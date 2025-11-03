@@ -470,10 +470,10 @@ def main():
     # Run with simplified configuration
     results = run_filter(
         df, 
-        num_particles=10,      
-        learning_rate=0.01,     
-        process_noise=0.1,      
-        measurement_noise=1.5   
+        num_particles=1000,        # ↑ Increase from 10
+        learning_rate=0.005,       # ↓ Decrease from 0.01
+        process_noise=0.05,        # ↓ Decrease from 0.1
+        measurement_noise=0.8,     # ↓ Decrease from 1.5
     )
     
     # Create visualization
