@@ -31,6 +31,10 @@ class ParticleFilterSimplified:
         self.estimates = []
         self.rates = []
         self.particles_history = []
+
+        # Full particle history for smoothing
+        self.full_particles_history = []
+        self.full_weights_history = []
         
         # Simplified refuel detection
         self.fuel_history = []
@@ -238,8 +242,81 @@ class ParticleFilterSimplified:
         # Store history
         self.estimates.append(fuel_est)
         self.rates.append((self.rate_moving + self.rate_idle) / 2)
-        
+
+        # Store full particles and weights for smoothing
+        self.full_particles_history.append(self.particles.copy())
+        self.full_weights_history.append(self.weights.copy())
+
         return fuel_est, is_refuel, confidence
+
+    def smooth(self, consumption_rates, dt_values):
+        """
+        Forward-Backward Particle Smoothing
+
+        Uses the stored particle history to compute smoothed estimates
+        that leverage both past and future observations.
+
+        Args:
+            consumption_rates: List of consumption rates used at each step
+            dt_values: List of time deltas used at each step
+
+        Returns:
+            smoothed_estimates: Array of smoothed fuel estimates
+        """
+        T = len(self.full_particles_history)
+        if T == 0:
+            return np.array([])
+
+        print("\nPerforming forward-backward smoothing...")
+
+        # Initialize smoothed weights with forward weights
+        smoothed_weights = [w.copy() for w in self.full_weights_history]
+
+        # Backward pass
+        for t in range(T - 2, -1, -1):
+            particles_t = self.full_particles_history[t]
+            particles_tp1 = self.full_particles_history[t + 1]
+            weights_tp1_smoothed = smoothed_weights[t + 1]
+
+            # Compute expected particle at t+1 given particle at t
+            consumption = consumption_rates[t]
+            dt = dt_values[t]
+
+            # For each particle at time t, compute its contribution
+            # to smoothed weights based on particles at t+1
+            new_weights = np.zeros_like(self.full_weights_history[t])
+
+            for i in range(self.num_particles):
+                # Expected position after prediction step
+                predicted = particles_t[i] - consumption * dt
+
+                # Compute likelihood of transitioning to each particle at t+1
+                # Using the process noise model
+                transition_loglik = -0.5 * ((particles_tp1 - predicted) ** 2) / (self.Q ** 2)
+                transition_loglik -= np.max(transition_loglik)  # Numerical stability
+                transition_lik = np.exp(transition_loglik)
+
+                # Weight by smoothed weights at t+1
+                contribution = np.sum(transition_lik * weights_tp1_smoothed)
+                new_weights[i] = self.full_weights_history[t][i] * contribution
+
+            # Normalize
+            if np.sum(new_weights) > 0:
+                smoothed_weights[t] = new_weights / np.sum(new_weights)
+
+            if (T - t) % max(1, T // 10) == 0:
+                pct = 100 * (T - t) / T
+                print(f"  Backward pass: {pct:.0f}% complete")
+
+        # Compute smoothed estimates using smoothed weights
+        smoothed_estimates = []
+        for t in range(T):
+            smoothed_est = np.average(self.full_particles_history[t],
+                                     weights=smoothed_weights[t])
+            smoothed_estimates.append(smoothed_est)
+
+        print("✓ Smoothing complete")
+        return np.array(smoothed_estimates)
 
 
 def load_data(csv_path='data/fuel_cmd.csv', nrows=None):
@@ -263,10 +340,10 @@ def load_data(csv_path='data/fuel_cmd.csv', nrows=None):
     return df_clean
 
 
-def run_filter(df, num_particles=500, learning_rate=0.01, 
+def run_filter(df, num_particles=500, learning_rate=0.01,
                process_noise=0.4, measurement_noise=0.8):
     """Run the simplified particle filter"""
-    
+
     pf = ParticleFilterSimplified(
         num_particles=num_particles,
         initial_fuel=df.iloc[0]['fuel_level'],
@@ -274,33 +351,51 @@ def run_filter(df, num_particles=500, learning_rate=0.01,
         measurement_noise=measurement_noise,
         learning_rate=learning_rate
     )
-    
+
     estimates = []
     refuel_events = []
     refuel_confidences = []
     refuel_count = 0
-    
-    print("\nProcessing measurements...")
-    
+
+    # Store for smoothing
+    consumption_rates = []
+    dt_values = []
+
+    print("\nProcessing measurements (Forward pass)...")
+
     for i in range(1, len(df)):
         curr_fuel = df.iloc[i]['fuel_level']
         curr_speed = df.iloc[i]['speed']
         prev_fuel = df.iloc[i-1]['fuel_level']
         curr_timestamp = df.iloc[i]['timestamp']
-        
+
+        # Calculate dt
+        if pf.last_timestamp is not None:
+            if isinstance(curr_timestamp, (int, float)):
+                dt = curr_timestamp - pf.last_timestamp
+            else:
+                dt = (curr_timestamp - pf.last_timestamp).total_seconds()
+        else:
+            dt = 1.0
+
+        # Store consumption rate and dt for smoothing
+        consumption = pf.rate_moving if abs(curr_speed) > 0.15 else pf.rate_idle
+        consumption_rates.append(consumption)
+        dt_values.append(dt)
+
         # Run step
         fuel_est, is_refuel, confidence = pf.step(
             prev_fuel, curr_fuel, curr_speed, curr_timestamp, step_num=i
         )
-        
+
         estimates.append(fuel_est)
-        
+
         # Track refueling
         if is_refuel:
             refuel_count += 1
             refuel_events.append(i)
             refuel_confidences.append(confidence)
-        
+
         # Progress updates
         if (i + 1) % (len(df) // 5) == 0:
             pct = 100 * (i + 1) / len(df)
@@ -309,13 +404,13 @@ def run_filter(df, num_particles=500, learning_rate=0.01,
                   f"Sensor: {curr_fuel:.2f}L | Error: {error:.2f}L | "
                   f"Refuels: {refuel_count}")
     
-    # Calculate metrics
+    # Calculate filtering metrics
     error = df['fuel_level'].values[1:] - estimates
     rmse = np.sqrt(np.mean(error**2))
     mae = np.mean(np.abs(error))
-    
+
     print(f"\n{'='*70}")
-    print("RESULTS:")
+    print("FILTERING RESULTS:")
     print(f"  RMSE: {rmse:.4f}L")
     print(f"  MAE:  {mae:.4f}L")
     print(f"  Refueling events detected: {refuel_count}")
@@ -324,13 +419,30 @@ def run_filter(df, num_particles=500, learning_rate=0.01,
     print(f"  Final rates - Moving: {pf.rate_moving*3600:.6f} L/hour")
     print(f"  Final rates - Idle: {pf.rate_idle*3600:.6f} L/hour")
     print(f"{'='*70}\n")
-    
+
+    # Perform smoothing
+    smoothed_estimates = pf.smooth(consumption_rates, dt_values)
+
+    # Calculate smoothing metrics
+    smoothed_error = df['fuel_level'].values[1:] - smoothed_estimates
+    smoothed_rmse = np.sqrt(np.mean(smoothed_error**2))
+    smoothed_mae = np.mean(np.abs(smoothed_error))
+
+    print(f"\n{'='*70}")
+    print("SMOOTHING RESULTS:")
+    print(f"  RMSE: {smoothed_rmse:.4f}L (improvement: {rmse - smoothed_rmse:.4f}L)")
+    print(f"  MAE:  {smoothed_mae:.4f}L (improvement: {mae - smoothed_mae:.4f}L)")
+    print(f"{'='*70}\n")
+
     return {
         'df': df[1:].reset_index(drop=True),
         'estimates': np.array(estimates),
+        'smoothed_estimates': smoothed_estimates,
         'rates': np.array(pf.rates),
         'rmse': rmse,
         'mae': mae,
+        'smoothed_rmse': smoothed_rmse,
+        'smoothed_mae': smoothed_mae,
         'particles_history': pf.particles_history,
         'refuel_events': refuel_events,
         'refuel_confidences': refuel_confidences,
@@ -342,13 +454,17 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
     """Create visualization"""
     df = results['df']
     est = results['estimates']
+    smoothed_est = results.get('smoothed_estimates', None)
     rates = results['rates']
     rmse = results['rmse']
     mae = results['mae']
+    smoothed_rmse = results.get('smoothed_rmse', None)
+    smoothed_mae = results.get('smoothed_mae', None)
     refuel_count = results.get('refuel_count', len(results['refuel_events']))
-    
+
     time = np.arange(len(df))
     error = df['fuel_level'].values - est
+    smoothed_error = df['fuel_level'].values - smoothed_est if smoothed_est is not None else None
     
     # Create subplot
     fig = make_subplots(
@@ -404,10 +520,18 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
     # PF Estimate
     fig.add_trace(
         go.Scatter(x=time, y=est, mode='lines',
-                name='PF Estimate', line=dict(color='orange', width=2.5)),
+                name='PF Estimate (Filtered)', line=dict(color='orange', width=2.5)),
         row=1, col=1
     )
-    
+
+    # Smoothed Estimate
+    if smoothed_est is not None:
+        fig.add_trace(
+            go.Scatter(x=time, y=smoothed_est, mode='lines',
+                    name='PF Estimate (Smoothed)', line=dict(color='red', width=2.5, dash='dot')),
+            row=1, col=1
+        )
+
     # Mark refuels
     if results['refuel_events']:
         refuel_indices = [idx-1 for idx in results['refuel_events'] if idx-1 < len(time)]
@@ -430,18 +554,32 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
     
     # Row 3: Error
     fig.add_trace(
-        go.Scatter(x=time, y=error, mode='lines', name='Error',
-                  line=dict(color='red', width=1.5), fill='tozeroy',
-                  fillcolor='rgba(255,0,0,0.15)'),
+        go.Scatter(x=time, y=error, mode='lines', name='Filtered Error',
+                  line=dict(color='orange', width=1.5), fill='tozeroy',
+                  fillcolor='rgba(255,165,0,0.15)'),
         row=3, col=1
     )
+
+    if smoothed_error is not None:
+        fig.add_trace(
+            go.Scatter(x=time, y=smoothed_error, mode='lines', name='Smoothed Error',
+                      line=dict(color='red', width=1.5, dash='dot'), fill='tozeroy',
+                      fillcolor='rgba(255,0,0,0.15)'),
+            row=3, col=1
+        )
+
     fig.add_hline(y=0, line_dash="dash", line_color="black", row=3, col=1, opacity=0.3)
     
     # Layout
+    title_str = f"Particle Filter | Filtered RMSE: {rmse:.3f}L, MAE: {mae:.3f}L"
+    if smoothed_rmse is not None and smoothed_mae is not None:
+        title_str += f" | Smoothed RMSE: {smoothed_rmse:.3f}L, MAE: {smoothed_mae:.3f}L"
+    title_str += f" | Refuels: {refuel_count}"
+
     fig.update_layout(
-        title=f"Simplified PF | RMSE: {rmse:.3f}L | MAE: {mae:.3f}L | Refuels: {refuel_count}",
-        height=1000, 
-        template='plotly_white', 
+        title=title_str,
+        height=1000,
+        template='plotly_white',
         hovermode='x unified',
         legend=dict(x=0.01, y=0.99)
     )
