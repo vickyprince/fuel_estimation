@@ -200,14 +200,15 @@ class ParticleFilterSimplified:
 
         # Calculate dt
         if self.last_timestamp is not None:
-            if isinstance(curr_timestamp, (int, float)):
-                dt = curr_timestamp - self.last_timestamp
-            else:
-                dt = (curr_timestamp - self.last_timestamp).total_seconds()
+            # compute dt safely for numeric or datetime timestamps
+            try:
+                delta = curr_timestamp - self.last_timestamp
+                # if datetime → convert to seconds
+                dt = delta.total_seconds() if hasattr(delta, "total_seconds") else float(delta)
+            except Exception:
+                dt = 1.0
         else:
             dt = 1.0
-
-        self.last_timestamp = curr_timestamp
         
         # Select consumption rate
         consumption = self.rate_moving if abs(curr_speed) > 0.15 else self.rate_idle
@@ -258,17 +259,22 @@ class ParticleFilterSimplified:
 
 
 def load_data(csv_path='data/fuel_cmd.csv', nrows=None):
-    """Load and clean CSV data"""
     fuel_col = 'ros_main__generator_controller__hatz_info__fuel_level__value'
     speed_col = 'ros_main__inverse_kinematics__cmd__data__speed'
-    
-    df = pd.read_csv(csv_path, nrows=nrows)
+
+    # parse datetime if the column exists
+    df = pd.read_csv(csv_path, nrows=nrows, parse_dates=['datetime'], dayfirst=False)
+    # if your CSV sometimes lacks 'datetime', create it from timestamp
+    if 'datetime' not in df.columns:
+        df['datetime'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+
     df_clean = pd.DataFrame({
         'fuel_level': df[fuel_col].fillna(0),
         'speed': df[speed_col].fillna(0),
-        'timestamp': df['timestamp']
+        'timestamp': df['timestamp'],
+        'datetime': df['datetime']          # <-- keep it
     })
-    
+
     df_clean = df_clean[df_clean['fuel_level'] > 0].reset_index(drop=True)
     
     print(f"✓ Loaded {len(df_clean):,} measurements")
@@ -362,19 +368,27 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
     mae = results['mae']
     refuel_count = results.get('refuel_count', len(results['refuel_events']))
     
-    time = np.arange(len(df))
+    # time = np.arange(len(df))
+    time = pd.to_datetime(
+        df['datetime'] if 'datetime' in df.columns
+        else pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+    )
     error = df['fuel_level'].values - est
+
+    sensor_rate = np.diff(df['fuel_level'], prepend=df['fuel_level'].iloc[0]) * -1
+    sensor_rate = np.clip(sensor_rate, 0, None)  # only positive consumption
     
     # Create subplot
     fig = make_subplots(
-        rows=3, cols=1,
+        rows=4, cols=1,
         subplot_titles=(
             f"Fuel Estimation (Refuels Detected: {refuel_count})",
+            "Consumption Rate",
             "Learned Consumption Rate",
             "Estimation Error"
         ),
-        row_heights=[0.4, 0.3, 0.3],
-        vertical_spacing=0.1
+        row_heights=[0.35, 0.2, 0.25, 0.2],
+        vertical_spacing=0.08
     )
     
     # Extract particle percentiles
@@ -435,12 +449,20 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
                     marker=dict(color='green', size=10, symbol='triangle-up')),
             row=1, col=1
         )
+
+    # Row 2: Sensor Rate
+    fig.add_trace(
+    go.Scatter(x=time, y=sensor_rate, mode='lines',
+               name='Instantaneous Rate',
+               line=dict(color='blue', width=1.5)),
+    row=2, col=1
+)
         
-    # Row 2: Rates
+    # Row 3: Rates
     fig.add_trace(
         go.Scatter(x=time, y=rates, mode='lines', name='Learned Rate',
                   line=dict(color='green', width=2)),
-        row=2, col=1
+        row=3, col=1
     )
     
     # Row 3: Error
@@ -448,9 +470,9 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
         go.Scatter(x=time, y=error, mode='lines', name='Error',
                   line=dict(color='red', width=1.5), fill='tozeroy',
                   fillcolor='rgba(255,0,0,0.15)'),
-        row=3, col=1
+        row=4, col=1
     )
-    fig.add_hline(y=0, line_dash="dash", line_color="black", row=3, col=1, opacity=0.3)
+    fig.add_hline(y=0, line_dash="dash", line_color="black", row=4, col=1, opacity=0.3)
     
     # Layout
     fig.update_layout(
@@ -462,9 +484,13 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
     )
     
     fig.update_yaxes(title_text="Fuel (L)", row=1, col=1)
-    fig.update_yaxes(title_text="Rate (L/step)", row=2, col=1)
-    fig.update_yaxes(title_text="Error (L)", row=3, col=1)
-    fig.update_xaxes(title_text="Measurement Step", row=3, col=1)
+    fig.update_yaxes(title_text="Instant Rate (L/step)", row=2, col=1)
+    fig.update_yaxes(title_text="Learned Rate (L/step)", row=3, col=1)
+    fig.update_yaxes(title_text="Error (L)", row=4, col=1)
+    # fig.update_xaxes(title_text="Time (minutes)", row=4, col=1)
+    for r in range(1, 5):
+        fig.update_xaxes(title_text="Time", row=r, col=1)
+    
     
     fig.write_html(output_file)
     print(f"✓ Visualization saved: {output_file}")
@@ -476,9 +502,9 @@ def main():
     print("PARTICLE FILTER")
     print("="*70)
 
-    nrows = sum(1 for _ in open('data/fuel_cmd.csv')) // 2
+    # nrows = sum(1 for _ in open('data/fuel_cmd.csv')) // 2
 
-    df = load_data(nrows=nrows)
+    df = load_data()
     
     print(f"Data: {len(df):,} measurements")
     
