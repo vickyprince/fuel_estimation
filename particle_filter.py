@@ -252,7 +252,8 @@ class ParticleFilterSimplified:
         
         # Store history
         self.estimates.append(fuel_est)
-        self.rates.append((self.rate_moving + self.rate_idle) / 2)
+        # Store actual consumption rate used in L/hour
+        self.rates.append(consumption * 3600)
         
         return fuel_est, is_refuel, confidence
 
@@ -370,7 +371,7 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
         rows=3, cols=1,
         subplot_titles=(
             f"Fuel Estimation (Refuels Detected: {refuel_count})",
-            "Learned Consumption Rate",
+            "Fuel Consumption Rate",
             "Estimation Error"
         ),
         row_heights=[0.4, 0.3, 0.3],
@@ -438,7 +439,7 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
         
     # Row 2: Rates
     fig.add_trace(
-        go.Scatter(x=time, y=rates, mode='lines', name='Learned Rate',
+        go.Scatter(x=time, y=rates, mode='lines', name='Consumption Rate',
                   line=dict(color='green', width=2)),
         row=2, col=1
     )
@@ -462,7 +463,7 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
     )
     
     fig.update_yaxes(title_text="Fuel (L)", row=1, col=1)
-    fig.update_yaxes(title_text="Rate (L/step)", row=2, col=1)
+    fig.update_yaxes(title_text="Consumption Rate (L/hour)", row=2, col=1)
     fig.update_yaxes(title_text="Error (L)", row=3, col=1)
     fig.update_xaxes(title_text="Measurement Step", row=3, col=1)
     
