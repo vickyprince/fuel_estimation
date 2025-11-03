@@ -11,7 +11,7 @@ class ParticleFilterSimplified:
     
     def __init__(self, num_particles=2000, initial_fuel=25.0,
                  process_noise=0.15, measurement_noise=0.5,
-                 learning_rate=0.1):
+                 learning_rate=0.1, ema_alpha=0.1):
         
         self.num_particles = num_particles
         self.Q = process_noise
@@ -38,6 +38,9 @@ class ParticleFilterSimplified:
         self.history_window = 20
         self.last_refuel_step = -50
         self.refuel_cooldown = 30
+
+        self.ema_alpha = ema_alpha  # 0.1-0.3 for smooth, 0.5-0.7 for responsive
+        self.ema_estimate = None
         
     def detect_refuel_simple(self, prev_fuel, curr_fuel, curr_speed, step_num):
         """
@@ -233,7 +236,19 @@ class ParticleFilterSimplified:
         resampled, ess = self.resample_ess_systematic()
         
         # Compute estimate
-        fuel_est = np.average(self.particles, weights=self.weights)
+        fuel_est_raw = np.average(self.particles, weights=self.weights)
+
+        # Apply EMA smoothing
+        if self.ema_estimate is None:
+            self.ema_estimate = fuel_est_raw
+        else:
+            # Reset EMA on refuel to respond quickly
+            if is_refuel:
+                self.ema_estimate = fuel_est_raw
+            else:
+                self.ema_estimate = self.ema_alpha * fuel_est_raw + (1 - self.ema_alpha) * self.ema_estimate
+
+        fuel_est = self.ema_estimate  # Use smoothed estimate
         
         # Store history
         self.estimates.append(fuel_est)
@@ -470,10 +485,10 @@ def main():
     # Run with simplified configuration
     results = run_filter(
         df, 
-        num_particles=1000,        # ↑ Increase from 10
-        learning_rate=0.005,       # ↓ Decrease from 0.01
-        process_noise=0.05,        # ↓ Decrease from 0.1
-        measurement_noise=0.8,     # ↓ Decrease from 1.5
+        num_particles=50,        
+        learning_rate=0.5,       
+        process_noise=0.05,      
+        measurement_noise=0.5    
     )
     
     # Create visualization
