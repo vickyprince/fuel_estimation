@@ -19,7 +19,8 @@ class ParticleFilterSimplified:
         self.rate_alpha = learning_rate
         
         # Initialize particles
-        self.particles = np.random.uniform(0, 35, num_particles)
+        # self.particles = np.random.uniform(0, 35, num_particles)
+        self.particles = np.random.normal(initial_fuel, 1.0, num_particles)
         self.particles = np.maximum(self.particles, 0)
         self.weights = np.ones(num_particles) / num_particles
 
@@ -126,21 +127,6 @@ class ParticleFilterSimplified:
         w = np.exp(logw)
         w = np.clip(w, 1e-300, None)
         self.weights = w / np.sum(w)
-
-    # def resample_ess_systematic(self):
-    #     """Resample if effective sample size is low"""
-    #     ess = 1.0 / np.sum(self.weights ** 2)
-    #     if ess < 0.5 * self.num_particles:
-    #         cdf = np.cumsum(self.weights)
-    #         u = (np.arange(self.num_particles) + np.random.uniform()) / self.num_particles
-    #         indices = np.searchsorted(cdf, u)
-    #         self.particles = self.particles[indices].copy()
-    #         sigma = 0.05 * max(1.0, np.std(self.particles))
-    #         self.particles += np.random.normal(0, sigma, self.particles.shape)
-    #         self.particles = np.maximum(self.particles, 0)
-    #         self.weights.fill(1.0/self.num_particles)
-    #         return True, ess
-    #     return False, ess
     
     def resample_ess_systematic(self):
         ess = 1.0 / np.sum(self.weights ** 2)
@@ -209,6 +195,8 @@ class ParticleFilterSimplified:
                 dt = 1.0
         else:
             dt = 1.0
+        
+        self.last_timestamp = curr_timestamp
         
         # Select consumption rate
         consumption = self.rate_moving if abs(curr_speed) > 0.15 else self.rate_idle
@@ -480,7 +468,14 @@ def plot_results(results, output_file='particle_filter_simplified.html'):
         height=1000, 
         template='plotly_white', 
         hovermode='x unified',
-        legend=dict(x=0.01, y=0.99)
+        legend=dict(
+            orientation="v",
+            x=1.02, y=1.0,           # outside top-right
+            xanchor="left", yanchor="top",
+            bgcolor="rgba(255,255,255,0.7)",
+            bordercolor="rgba(0,0,0,0.15)",
+            borderwidth=1
+        ),
     )
     
     fig.update_yaxes(title_text="Fuel (L)", row=1, col=1)
