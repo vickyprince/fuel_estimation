@@ -110,7 +110,8 @@ class ParticleFilter2D:
         # Rate evolution: Random walk (no speed dependence!)
         # The rate adapts through the measurement update (Bayesian posterior)
         # not through direct speed coupling
-        new_rate = rate.copy()
+        # new_rate = rate.copy()
+        new_rate = 0.98 * rate
         
         # Add process noise to model uncertainty in system dynamics
         # Noise on fuel: accounts for measurement errors, sensor lag, etc.
@@ -118,7 +119,7 @@ class ParticleFilter2D:
         # Noise on rate: allows rate to drift/adapt
         rate_noise = np.random.normal(0, self.config.rate_process_noise, self.num_particles)
         
-        self.particles[:, 0] = new_fuel
+        self.particles[:, 0] = new_fuel + fuel_noise
         self.particles[:, 1] = new_rate + rate_noise
         
         # Enforce physical constraints
@@ -195,52 +196,53 @@ class ParticleFilter2D:
         ess = 1.0 / np.sum(self.weights ** 2)
         
         # Resample if ESS drops below threshold
-        # ess_threshold = self.config.ess_threshold * self.num_particles
+        ess_threshold = self.config.ess_threshold * self.num_particles
         
-        # if ess < ess_threshold:
-        # === SYSTEMATIC RESAMPLING ===
-        # Create cumulative distribution
-        cdf = np.cumsum(self.weights)
+        if ess < ess_threshold:
+            # === SYSTEMATIC RESAMPLING ===
+            # Create cumulative distribution
+            cdf = np.cumsum(self.weights)
+            
+            # Generate uniform sample positions
+            u = (np.arange(self.num_particles) + np.random.uniform()) / self.num_particles
+            
+            # Find which particles to select (binary search)
+            indices = np.searchsorted(cdf, u)
+            indices = np.clip(indices, 0, self.num_particles - 1)
+            
+            # Replicate selected particles
+            self.particles = self.particles[indices].copy()
+            
+            # === ROUGHENING (add jitter for diversity) ===
+            # Prevents particle collapse to single point
+            # Roughening amount depends on state spread
+            fuel_percentiles = np.percentile(self.particles[:, 0], [5, 95])
+            rate_percentiles = np.percentile(self.particles[:, 1], [5, 95])
+            
+            fuel_span = fuel_percentiles[1] - fuel_percentiles[0]
+            rate_span = rate_percentiles[1] - rate_percentiles[0]
+            
+            # Roughening proportional to state space span and inversely to N^(1/d)
+            # d=2 (state dimension)
+            roughening_factor = 0.01 / (self.num_particles ** (1/2))
+            
+            fuel_roughen_sigma = max(0.1, roughening_factor * fuel_span)
+            # fuel_roughen_sigma = roughening_factor * fuel_span * 0.3
+            rate_roughen_sigma = max(0.00001, roughening_factor * rate_span)
+            
+            self.particles[:, 0] += np.random.normal(0, fuel_roughen_sigma, self.num_particles)
+            self.particles[:, 1] += np.random.normal(0, rate_roughen_sigma, self.num_particles)
+            
+            # Re-enforce constraints
+            self.particles[:, 0] = np.maximum(self.particles[:, 0], 0)
+            self.particles[:, 1] = np.maximum(self.particles[:, 1], 0)
+            
+            # Reset weights to uniform
+            self.weights = np.ones(self.num_particles) / self.num_particles
+            
+            return True, ess
         
-        # Generate uniform sample positions
-        u = (np.arange(self.num_particles) + np.random.uniform()) / self.num_particles
-        
-        # Find which particles to select (binary search)
-        indices = np.searchsorted(cdf, u)
-        indices = np.clip(indices, 0, self.num_particles - 1)
-        
-        # Replicate selected particles
-        self.particles = self.particles[indices].copy()
-        
-        # === ROUGHENING (add jitter for diversity) ===
-        # Prevents particle collapse to single point
-        # Roughening amount depends on state spread
-        fuel_percentiles = np.percentile(self.particles[:, 0], [5, 95])
-        rate_percentiles = np.percentile(self.particles[:, 1], [5, 95])
-        
-        fuel_span = fuel_percentiles[1] - fuel_percentiles[0]
-        rate_span = rate_percentiles[1] - rate_percentiles[0]
-        
-        # Roughening proportional to state space span and inversely to N^(1/d)
-        # d=2 (state dimension)
-        roughening_factor = 0.2 / (self.num_particles ** (1/2))
-        
-        fuel_roughen_sigma = max(0.1, roughening_factor * fuel_span)
-        rate_roughen_sigma = max(0.00001, roughening_factor * rate_span)
-        
-        self.particles[:, 0] += np.random.normal(0, fuel_roughen_sigma, self.num_particles)
-        self.particles[:, 1] += np.random.normal(0, rate_roughen_sigma, self.num_particles)
-        
-        # Re-enforce constraints
-        self.particles[:, 0] = np.maximum(self.particles[:, 0], 0)
-        self.particles[:, 1] = np.maximum(self.particles[:, 1], 0)
-        
-        # Reset weights to uniform
-        self.weights = np.ones(self.num_particles) / self.num_particles
-        
-        return True, ess
-        
-        # return False, ess
+        return False, ess
     
     # ==================== REFUEL DETECTION ====================
     def detect_refuel(self, prev_fuel, curr_fuel, curr_speed, step_num):
@@ -327,7 +329,7 @@ class ParticleFilter2D:
         
         # On refuel: reset particle distribution around measured fuel
         if is_refuel:
-            reset_ratio = 0.3 + 0.4 * confidence  # 30-70% of particles reset
+            reset_ratio = 0.5 + 0.3 * confidence
             n_reset = int(self.num_particles * reset_ratio)
             reset_indices = np.random.choice(self.num_particles, n_reset, replace=False)
             
@@ -390,7 +392,8 @@ class ParticleFilter2D:
             'rate_p95': rate_p95,
             'fuel_std': fuel_std, 'rate_std': rate_std,
             'is_refuel': is_refuel, 'confidence': confidence,
-            'ess': ess, 'resampled': resampled
+            'ess': ess, 'resampled': resampled,
+            'particles': self.particles.copy()
         })
         
         if is_refuel:
@@ -400,7 +403,7 @@ class ParticleFilter2D:
         return fuel_est, rate_est, fuel_std, is_refuel, confidence
 
 
-def load_data(csv_path='data/fuel_cmd.csv', nrows=None):
+def load_data(csv_path='fuel_cmd.csv', nrows=None):
     """Load and preprocess fuel data"""
     fuel_col = 'ros_main__generator_controller__hatz_info__fuel_level__value'
     speed_col = 'ros_main__inverse_kinematics__cmd__data__speed'
@@ -458,15 +461,6 @@ def run_filter(df, config: ParticleFilterConfig):
         fuel_est, rate_est, fuel_std, is_refuel, confidence = pf.step(
             prev_fuel, curr_fuel, curr_speed, df.iloc[i]['datetime'], dt, step_num=i
         )
-
-        # if i % 1000 == 0:  # print every 100th step
-        #     rate_mean = np.mean(pf.particles[:, 1])
-        #     rate_std = np.std(pf.particles[:, 1])
-        #     rate_min = np.min(pf.particles[:, 1])
-        #     rate_max = np.max(pf.particles[:, 1])
-        #     print(f"[Step {i}] Rate mean={rate_mean:.6f}, std={rate_std:.6f}, "
-        #         f"min={rate_min:.6f}, max={rate_max:.6f}")
-        
         fuel_estimates.append(fuel_est)
         rate_estimates.append(rate_est)
         fuel_stds.append(fuel_std)
@@ -529,17 +523,28 @@ def plot_results(results, output_file='particle_filter_2d.html'):
     
     # Extract particle percentiles
     particles_hist = pf.particles_history
-    fuel_p5 = np.array([p['fuel_p5'] for p in particles_hist])
-    fuel_p25 = np.array([p['fuel_p25'] for p in particles_hist])
-    fuel_p75 = np.array([p['fuel_p75'] for p in particles_hist])
-    fuel_p95 = np.array([p['fuel_p95'] for p in particles_hist])
-    rate_p5 = np.array([p['rate_p5'] for p in particles_hist])
-    rate_p25 = np.array([p['rate_p25'] for p in particles_hist])
-    rate_p75 = np.array([p['rate_p75'] for p in particles_hist])
-    rate_p95 = np.array([p['rate_p95'] for p in particles_hist])
-    fuel_std_arr = np.array([p['fuel_std'] for p in particles_hist])
-    ess_arr = np.array([p['ess'] for p in particles_hist])
-    resampled_arr = np.array([p['resampled'] for p in particles_hist])
+    # fuel_p5 = np.array([p['fuel_p5'] for p in particles_hist])
+    # fuel_p25 = np.array([p['fuel_p25'] for p in particles_hist])
+    # fuel_p75 = np.array([p['fuel_p75'] for p in particles_hist])
+    # fuel_p95 = np.array([p['fuel_p95'] for p in particles_hist])
+    # rate_p5 = np.array([p['rate_p5'] for p in particles_hist])
+    # rate_p25 = np.array([p['rate_p25'] for p in particles_hist])
+    # rate_p75 = np.array([p['rate_p75'] for p in particles_hist])
+    # rate_p95 = np.array([p['rate_p95'] for p in particles_hist])
+    # fuel_std_arr = np.array([p['fuel_std'] for p in particles_hist])
+    # ess_arr = np.array([p['ess'] for p in particles_hist])
+    # resampled_arr = np.array([p['resampled'] for p in particles_hist])
+
+    # num_particles = pf.num_particles
+
+    # # # Build trajectories: shape (num_particles, T)
+    # fuel_particles_traj = np.zeros((num_particles, len(particles_hist)))
+    # rate_particles_traj = np.zeros((num_particles, len(particles_hist)))
+
+    # for t, ph in enumerate(particles_hist):
+    #     # ph['particles'] has shape (num_particles, 2)
+    #     fuel_particles_traj[:, t] = ph['particles'][:, 0]
+    #     rate_particles_traj[:, t] = ph['particles'][:, 1] * 3600.0  # convert to L/h
     
     # Create subplots
     fig = make_subplots(
@@ -560,29 +565,45 @@ def plot_results(results, output_file='particle_filter_2d.html'):
         row=1, col=1
     )
     
-    fig.add_trace(
-        go.Scatter(x=time, y=fuel_p95, fill=None, mode='lines',
-                   line_color='rgba(0,0,0,0)', showlegend=False),
-        row=1, col=1
-    )
-    fig.add_trace(
-        go.Scatter(x=time, y=fuel_p5, fill='tonexty', mode='lines',
-                   line_color='rgba(0,0,0,0)', fillcolor='rgba(100,149,237,0.2)',
-                   name='5-95% Particle Range'),
-        row=1, col=1
-    )
+    # fig.add_trace(
+    #     go.Scatter(x=time, y=fuel_p95, fill=None, mode='lines',
+    #                line_color='rgba(0,0,0,0)', showlegend=False),
+    #     row=1, col=1
+    # )
+    # fig.add_trace(
+    #     go.Scatter(x=time, y=fuel_p5, fill='tonexty', mode='lines',
+    #                line_color='rgba(0,0,0,0)', fillcolor='rgba(100,149,237,0.2)',
+    #                name='5-95% Particle Range'),
+    #     row=1, col=1
+    # )
     
-    fig.add_trace(
-        go.Scatter(x=time, y=fuel_p75, fill=None, mode='lines',
-                   line_color='rgba(0,0,0,0)', showlegend=False),
-        row=1, col=1
-    )
-    fig.add_trace(
-        go.Scatter(x=time, y=fuel_p25, fill='tonexty', mode='lines',
-                   line_color='rgba(0,0,0,0)', fillcolor='rgba(30,144,255,0.3)',
-                   name='25-75% IQR'),
-        row=1, col=1
-    )
+    # fig.add_trace(
+    #     go.Scatter(x=time, y=fuel_p75, fill=None, mode='lines',
+    #                line_color='rgba(0,0,0,0)', showlegend=False),
+    #     row=1, col=1
+    # )
+    # fig.add_trace(
+    #     go.Scatter(x=time, y=fuel_p25, fill='tonexty', mode='lines',
+    #                line_color='rgba(0,0,0,0)', fillcolor='rgba(30,144,255,0.3)',
+    #                name='25-75% IQR'),
+    #     row=1, col=1
+    # )
+
+    # for pid in range(num_particles):
+    #     fig.add_trace(
+    #         go.Scatter(
+    #             x=time,
+    #             y=fuel_particles_traj[pid, :],
+    #             mode='lines+markers',
+    #             name=f'Particle {pid} Fuel',
+    #             line=dict(width=1),
+    #             marker=dict(size=5),
+    #             opacity=0.7,
+    #             showlegend=(pid == 0),  # only one legend entry to avoid clutter
+    #             legendgroup="particles_fuel"
+    #         ),
+    #         row=1, col=1
+    #     )
     
     fig.add_trace(
         go.Scatter(x=time, y=fuel_est, mode='lines',
@@ -620,30 +641,46 @@ def plot_results(results, output_file='particle_filter_2d.html'):
         row=2, col=1
     )
 
-    fig.add_trace(
-        go.Scatter(x=time, y=rate_p95*3600, fill=None, mode='lines',
-                   line_color='rgba(0,0,0,0)', showlegend=False),
-        row=2, col=1
-    )
+    # fig.add_trace(
+    #     go.Scatter(x=time, y=rate_p95*3600, fill=None, mode='lines',
+    #                line_color='rgba(0,0,0,0)', showlegend=False),
+    #     row=2, col=1
+    # )
 
-    fig.add_trace(
-        go.Scatter(x=time, y=rate_p5*3600, fill='tonexty', mode='lines',
-                   line_color='rgba(0,0,0,0)', fillcolor='rgba(100,149,237,0.2)',
-                   name='5-95% Rate Particle Range'),
-        row=2, col=1
-    )
+    # fig.add_trace(
+    #     go.Scatter(x=time, y=rate_p5*3600, fill='tonexty', mode='lines',
+    #                line_color='rgba(0,0,0,0)', fillcolor='rgba(100,149,237,0.2)',
+    #                name='5-95% Rate Particle Range'),
+    #     row=2, col=1
+    # )
 
-    fig.add_trace(
-        go.Scatter(x=time, y=rate_p75*3600, fill=None, mode='lines',
-                   line_color='rgba(0,0,0,0)', showlegend=False),
-        row=2, col=1
-    )
-    fig.add_trace(
-        go.Scatter(x=time, y=rate_p25*3600, fill='tonexty', mode='lines',
-                   line_color='rgba(0,0,0,0)', fillcolor='rgba(30,144,255,0.3)',
-                   name='25-75% Rate Particle IQR'),
-        row=2, col=1
-    )
+    # fig.add_trace(
+    #     go.Scatter(x=time, y=rate_p75*3600, fill=None, mode='lines',
+    #                line_color='rgba(0,0,0,0)', showlegend=False),
+    #     row=2, col=1
+    # )
+    # fig.add_trace(
+    #     go.Scatter(x=time, y=rate_p25*3600, fill='tonexty', mode='lines',
+    #                line_color='rgba(0,0,0,0)', fillcolor='rgba(30,144,255,0.3)',
+    #                name='25-75% Rate Particle IQR'),
+    #     row=2, col=1
+    # )
+
+    # for pid in range(num_particles):
+    #     fig.add_trace(
+    #         go.Scatter(
+    #             x=time,
+    #             y=rate_particles_traj[pid, :],
+    #             mode='lines+markers',
+    #             name=f'Particle {pid} Rate',
+    #             line=dict(width=1),
+    #             marker=dict(size=5),
+    #             opacity=0.7,
+    #             showlegend=(pid == 0),  # only one legend entry
+    #             legendgroup="particles_rate"
+    #         ),
+    #         row=2, col=1
+    #     )
     
     # Row 4: ESS
     # fig.add_trace(
@@ -704,30 +741,35 @@ def main():
     print("="*70)
     
     # Configuration
+    # config = ParticleFilterConfig(
+    #     num_particles=300,
+    #     fuel_process_noise=1.5,      
+    #     rate_process_noise=1e-4,      
+    #     measurement_noise=5.0,        
+    #     ess_threshold=0.5
+    # )
+
     config = ParticleFilterConfig(
-        num_particles=5,
+        num_particles=300,
         fuel_process_noise=0.15,      
         rate_process_noise=5e-4,      
         measurement_noise=1.5,        
         ess_threshold=0.5
     )
-
-    # config = ParticleFilterConfig(
-    #     num_particles=300,
-    #     fuel_process_noise=0.35,      
-    #     rate_process_noise=5e-4,      
-    #     measurement_noise=2.5,        
-    #     ess_threshold=0.5
-    # )
     
     # Load data
-    df = load_data('data/fuel_cmd.csv')
+    df = load_data('fuel_cmd.csv')
+    day_start = pd.Timestamp('2025-08-15 00:00:00')
+    day_end   = day_start + pd.Timedelta(days=10)
+
+    df_day = df[(df['datetime'] >= day_start) & (df['datetime'] < day_end)].reset_index(drop=True)
     
     # Run filter
-    results = run_filter(df, config)
+    # results = run_filter(df, config)
+    results = run_filter(df_day, config)
     
     # Visualize
-    plot_results(results, 'particle_filter_2d.html')
+    plot_results(results, 'particle_filter.html')
     
     print("✓ Complete!\n")
 
